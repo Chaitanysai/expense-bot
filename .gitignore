@@ -1,0 +1,7 @@
+# Ignore Google credentials
+service_account.json
+
+# Ignore Python cache & venv
+venv/
+__pycache__/
+*.pyc
