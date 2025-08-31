@@ -80,7 +80,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Sheet1!A:E",
+            range="Expense Tracker!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
@@ -93,7 +93,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID, range="Sheet1!A:E"
+            spreadsheetId=SPREADSHEET_ID, range="Expense Tracker!A:E"
         ).execute()
         rows = result.get("values", [])[1:]  # skip headers
 
