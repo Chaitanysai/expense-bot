@@ -53,15 +53,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Hi! Send me expenses like:\n"
         "`250 groceries dinner`\n\n"
         "If you don’t include a date, I’ll use today.\n"
+        "Send `Total` to see all-time total.\n"
         "Use /summary for weekly report."
     )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = update.message.text.strip()
-        parts = text.split()
 
-        # Try parsing first word as a date (dd-MMM-YYYY)
+        # Special case: user asks for total
+        if text.lower() == "total":
+            result = sheet.values().get(
+                spreadsheetId=SPREADSHEET_ID, range="'Transactions'!A:B"
+            ).execute()
+            rows = result.get("values", [])[1:]  # skip headers
+
+            total = 0
+            for row in rows:
+                try:
+                    amt = float(row[1].replace("₹", "").replace(",", ""))
+                    total += amt
+                except:
+                    continue
+
+            await update.message.reply_text(f"💰 Total spent so far: ₹{total:,.0f}")
+            return
+
+        # Normal expense flow
+        parts = text.split()
         try:
             expense_date = datetime.datetime.strptime(parts[0], "%d-%b-%Y").strftime("%d-%b-%Y")
             amount = parts[1]
@@ -80,7 +99,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Expense Tracker!A:E",
+            range="'Transactions'!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
@@ -93,7 +112,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID, range="Expense Tracker!A:E"
+            spreadsheetId=SPREADSHEET_ID, range="'Transactions'!A:E"
         ).execute()
         rows = result.get("values", [])[1:]  # skip headers
 
