@@ -1,74 +1,160 @@
-import os, json, logging
-from datetime import datetime
+import os
+import json
+import datetime
 from telegram import Update
-from telegram.ext import Application, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
 
-# --- Bot & Sheet Info ---
-TOKEN = "8375627088:AAFdnn6KKwqsHYZ2ie73B9-YdMlC3Uu2C-Y"
-SPREADSHEET_ID = "1VEliBNt3PnUlp3UEsWRI-HU-b1KEafChsOx1jeR1PHk"
+# ======================
+# Secrets
+# ======================
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8375627088:AAFdnn6KKwqsHYZ2ie73B9-YdMlC3Uu2C-Y")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VEliBNt3PnUlp3UEsWRI-HU-b1KEafChsOx1jeR1PHk")
 
-# --- Google Sheets Auth ---
-service_account_info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
-creds = Credentials.from_service_account_info(
-    service_account_info,
-    scopes=["https://www.googleapis.com/auth/spreadsheets"]
-)
+# ======================
+# Hybrid Service Account Loader
+# ======================
+if os.getenv("SERVICE_ACCOUNT_JSON"):
+    # Railway: JSON comes from environment variable
+    service_account_info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
+    creds = service_account.Credentials.from_service_account_info(
+        service_account_info,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+else:
+    # Local: use the file
+    SERVICE_ACCOUNT_FILE = "service_account.json"
+    creds = service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE,
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+
 service = build("sheets", "v4", credentials=creds)
+sheet = service.spreadsheets()
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
+# ======================
+# Category auto-detect
+# ======================
+CATEGORY_KEYWORDS = {
+    "fuel": "🏍️ Bike Fuel",
+    "petrol": "🏍️ Bike Fuel",
+    "grocery": "🛒 Groceries",
+    "groceries": "🛒 Groceries",
+    "food": "🍱 Food Delivery / Dining Out",
+    "dining": "🍱 Food Delivery / Dining Out",
+    "emi": "🚗 EMI – Bike Loan",
+    "loan": "💳 EMI – Home Loan",
+    "subscription": "📺 Subscriptions",
+    "insurance": "📑 Insurance",
+    "shop": "🎁 Miscellaneous / Shopping",
+    "others": "🌟 Others"
+}
 
-fixed_categories = ["EMI", "Rent", "Insurance", "Subscriptions", "Utilities"]
+def detect_category(text: str) -> str:
+    text = text.lower()
+    for key, category in CATEGORY_KEYWORDS.items():
+        if key in text:
+            return category
+    return "🌟 Others"
 
-# --- Expense Logging Function ---
-async def log_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text.strip()
+# ======================
+# Bot Handlers
+# ======================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Hi! Send me expenses like:\n`250 groceries dinner`\n\nUse /summary for weekly report.")
+
+async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        parts = msg.split()
+        text = update.message.text.strip()
+        parts = text.split()
 
-        # Try to parse the first 3 parts as a date
+        # Try to parse first word as date (dd-MMM-YYYY)
         try:
-            datetime.strptime(" ".join(parts[:3]), "%d %b %Y")
-            has_date = True
-        except Exception:
-            has_date = False
-
-        if has_date:
-            date = f"{parts[0]} {parts[1]} {parts[2]}"
-            amount = parts[3]
-            category = parts[4] if len(parts) > 4 else ""
-            notes = " ".join(parts[5:]) if len(parts) > 5 else ""
-        else:
-            # Shortcut → no date provided → use today
-            date = datetime.today().strftime("%d %b %Y")
+            expense_date = datetime.datetime.strptime(parts[0], "%d-%b-%Y").strftime("%d-%b-%Y")
+            amount = parts[1]
+            notes = " ".join(parts[2:])
+        except ValueError:
+            # No date → use today
+            expense_date = datetime.datetime.now().strftime("%d-%b-%Y")
             amount = parts[0]
-            category = parts[1] if len(parts) > 1 else ""
-            notes = " ".join(parts[2:]) if len(parts) > 2 else ""
+            notes = " ".join(parts[1:])
 
-        type_value = "Fixed" if any(f in category for f in fixed_categories) else "Variable"
+        # Detect category
+        category = detect_category(notes)
 
-        values = [[date, amount, category, type_value, notes]]
-        body = {"values": values}
-        service.spreadsheets().values().append(
+        # Fixed vs Variable
+        expense_type = "Fixed" if "EMI" in category or "Loan" in category else "Variable"
+
+        values = [[expense_date, amount, category, expense_type, notes]]
+        sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Transactions!A:E",
+            range="Sheet1!A:E",
             valueInputOption="USER_ENTERED",
-            body=body
+            body={"values": values}
         ).execute()
 
-        await update.message.reply_text(
-            f"✅ Logged: {amount} in {category} ({type_value}) on {date} {f'({notes})' if notes else ''}"
-        )
+        await update.message.reply_text(f"✅ Added: {amount} under {category} ({expense_type})")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-# --- Main ---
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Sheet1!A:E"
+        ).execute()
+        rows = result.get("values", [])[1:]  # skip headers
+
+        if not rows:
+            await update.message.reply_text("No data yet.")
+            return
+
+        today = datetime.datetime.now()
+        week_ago = today - datetime.timedelta(days=7)
+
+        expenses = []
+        for row in rows:
+            try:
+                date = datetime.datetime.strptime(row[0], "%d-%b-%Y")
+                if date >= week_ago:
+                    amount = float(row[1].replace("₹", "").replace(",", ""))
+                    category = row[2]
+                    expenses.append((date, amount, category))
+            except:
+                continue
+
+        if not expenses:
+            await update.message.reply_text("No expenses this week.")
+            return
+
+        total = sum(x[1] for x in expenses)
+        biggest = max(expenses, key=lambda x: x[1])
+
+        category_totals = {}
+        for _, amt, cat in expenses:
+            category_totals[cat] = category_totals.get(cat, 0) + amt
+
+        summary_text = f"📊 *Expense Summary*\n{week_ago.strftime('%d %b')} – {today.strftime('%d %b')}\n\n"
+        summary_text += f"💰 Total: ₹{total:,.0f}\n"
+        summary_text += f"🔥 Biggest: {biggest[2]} (₹{biggest[1]:,.0f})\n\n"
+        summary_text += "📌 Categories:\n"
+        for cat, amt in category_totals.items():
+            summary_text += f"- {cat}: ₹{amt:,.0f}\n"
+
+        await update.message.reply_text(summary_text, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+# ======================
+# Main
+# ======================
 def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, log_expense))
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
     app.run_polling()
 
 if __name__ == "__main__":
