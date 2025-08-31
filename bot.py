@@ -159,22 +159,25 @@ async def send_summary(chat_id: int):
         await app.bot.send_message(chat_id=chat_id, text=f"⚠️ Error in summary: {str(e)}")
 
 # ======================
-# Main
+# Setup Scheduler AFTER app starts
 # ======================
-def main():
-    global app
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
-
-    # Attach scheduler to PTB loop
+async def setup_scheduler(app: Application):
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
     scheduler.add_job(lambda: asyncio.create_task(send_summary(CHAT_ID)), "cron", hour=21, minute=0)   # daily
     scheduler.add_job(lambda: asyncio.create_task(send_summary(CHAT_ID)), "cron", day_of_week="sun", hour=21, minute=0)  # weekly
     scheduler.add_job(lambda: asyncio.create_task(send_summary(CHAT_ID)), "cron", day=1, hour=21, minute=0)  # monthly
     scheduler.start()
+
+# ======================
+# Main
+# ======================
+def main():
+    global app
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(setup_scheduler).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
 
     app.run_polling()
 
