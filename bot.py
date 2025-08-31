@@ -7,7 +7,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # ======================
-# Config (Railway will inject via env vars)
+# Config (Railway injects via env vars)
 # ======================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
@@ -21,7 +21,7 @@ service = build("sheets", "v4", credentials=creds)
 sheet = service.spreadsheets()
 
 # ======================
-# Category auto-detect (maps free text → your dropdowns)
+# Category auto-detect
 # ======================
 CATEGORY_KEYWORDS = {
     "fuel": "🏍️ Bike Fuel",
@@ -53,34 +53,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👋 Hi! Send me expenses like:\n"
         "`250 groceries dinner`\n\n"
         "If you don’t include a date, I’ll use today.\n"
-        "Send `Total` to see all-time total.\n"
-        "Use /summary for weekly report."
+        "Use /summary for weekly report.\n"
+        "Use /total for lifetime spending.\n"
+        "Use /id to get your chat ID."
     )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = update.message.text.strip()
 
-        # Special case: user asks for total
+        # Special command-like shortcut
         if text.lower() == "total":
-            result = sheet.values().get(
-                spreadsheetId=SPREADSHEET_ID, range="'Transactions'!A:B"
-            ).execute()
-            rows = result.get("values", [])[1:]  # skip headers
-
-            total = 0
-            for row in rows:
-                try:
-                    amt = float(row[1].replace("₹", "").replace(",", ""))
-                    total += amt
-                except:
-                    continue
-
-            await update.message.reply_text(f"💰 Total spent so far: ₹{total:,.0f}")
+            await total(update, context)
             return
 
-        # Normal expense flow
         parts = text.split()
+
+        # Try parsing first word as a date (dd-MMM-YYYY)
         try:
             expense_date = datetime.datetime.strptime(parts[0], "%d-%b-%Y").strftime("%d-%b-%Y")
             amount = parts[1]
@@ -95,11 +84,11 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         category = detect_category(notes)
         expense_type = "Fixed" if "EMI" in category or "Loan" in category else "Variable"
 
-        # Push to Google Sheets
+        # Push to Google Sheets (Transactions sheet)
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="'Transactions'!A:E",
+            range="Transactions!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
@@ -112,7 +101,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID, range="'Transactions'!A:E"
+            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
         ).execute()
         rows = result.get("values", [])[1:]  # skip headers
 
@@ -138,7 +127,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No expenses this week.")
             return
 
-        total = sum(x[1] for x in expenses)
+        total_amt = sum(x[1] for x in expenses)
         biggest = max(expenses, key=lambda x: x[1])
 
         category_totals = {}
@@ -146,7 +135,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
             category_totals[cat] = category_totals.get(cat, 0) + amt
 
         summary_text = f"📊 *Expense Summary*\n{week_ago.strftime('%d %b')} – {today.strftime('%d %b')}\n\n"
-        summary_text += f"💰 Total: ₹{total:,.0f}\n"
+        summary_text += f"💰 Total: ₹{total_amt:,.0f}\n"
         summary_text += f"🔥 Biggest: {biggest[2]} (₹{biggest[1]:,.0f})\n\n"
         summary_text += "📌 Categories:\n"
         for cat, amt in category_totals.items():
@@ -157,6 +146,35 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
+async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """All-time total spending"""
+    try:
+        result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
+        ).execute()
+        rows = result.get("values", [])[1:]
+
+        if not rows:
+            await update.message.reply_text("No expenses recorded yet.")
+            return
+
+        total_amt = 0
+        for row in rows:
+            try:
+                total_amt += float(row[1].replace("₹", "").replace(",", ""))
+            except:
+                continue
+
+        await update.message.reply_text(f"💰 Total spent till now: ₹{total_amt:,.0f}")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return the user's chat ID"""
+    chat_id = update.message.chat_id
+    await update.message.reply_text(f"🆔 Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
+
 # ======================
 # Main
 # ======================
@@ -164,6 +182,8 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(CommandHandler("total", total))
+    app.add_handler(CommandHandler("id", get_id))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
     app.run_polling()
 
