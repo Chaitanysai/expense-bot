@@ -1,11 +1,12 @@
 import os
 import json
 import datetime
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ======================
 # Config
@@ -13,9 +14,7 @@ from googleapiclient.discovery import build
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 service_account_info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
-
-# Your personal chat ID
-OWNER_CHAT_ID = 1133284028  
+CHAT_ID = int(os.getenv("CHAT_ID", "1133284028"))  # your chat id
 
 creds = service_account.Credentials.from_service_account_info(
     service_account_info,
@@ -24,9 +23,6 @@ creds = service_account.Credentials.from_service_account_info(
 service = build("sheets", "v4", credentials=creds)
 sheet = service.spreadsheets()
 
-# ======================
-# Category auto-detect
-# ======================
 CATEGORY_KEYWORDS = {
     "fuel": "🏍️ Bike Fuel",
     "petrol": "🏍️ Bike Fuel",
@@ -58,18 +54,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`250 groceries dinner`\n\n"
         "If you don’t include a date, I’ll use today.\n"
         "Use /summary for weekly report.\n"
-        "Use /total for lifetime spending.\n"
-        "Use /id to get your chat ID."
+        "Type 'Total' anytime to get lifetime spend."
     )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = update.message.text.strip()
 
-        # Special shortcut
+        # If user asks for total
         if text.lower() == "total":
-            await total(update, context)
-            return
+            return await total(update, context)
 
         parts = text.split()
 
@@ -90,7 +84,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Transactions!A:E",
+            range="Transactions!A:E",   # <-- ✅ matches your sheet tab name
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
@@ -101,21 +95,9 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = await generate_summary(days=7)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    await send_summary(update.message.chat_id)
 
 async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = await generate_total()
-    await update.message.reply_text(text)
-
-async def get_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    await update.message.reply_text(f"🆔 Your Chat ID is: `{chat_id}`", parse_mode="Markdown")
-
-# ======================
-# Helpers to generate reports
-# ======================
-async def generate_summary(days=7):
     try:
         result = sheet.values().get(
             spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
@@ -123,53 +105,8 @@ async def generate_summary(days=7):
         rows = result.get("values", [])[1:]
 
         if not rows:
-            return "No data yet."
-
-        today = datetime.datetime.now()
-        since = today - datetime.timedelta(days=days)
-
-        expenses = []
-        for row in rows:
-            try:
-                date = datetime.datetime.strptime(row[0], "%d-%b-%Y")
-                if date >= since:
-                    amount = float(row[1].replace("₹", "").replace(",", ""))
-                    category = row[2]
-                    expenses.append((date, amount, category))
-            except:
-                continue
-
-        if not expenses:
-            return f"No expenses in last {days} days."
-
-        total_amt = sum(x[1] for x in expenses)
-        biggest = max(expenses, key=lambda x: x[1])
-
-        category_totals = {}
-        for _, amt, cat in expenses:
-            category_totals[cat] = category_totals.get(cat, 0) + amt
-
-        summary_text = f"📊 *Expense Summary ({days} days)*\n{since.strftime('%d %b')} – {today.strftime('%d %b')}\n\n"
-        summary_text += f"💰 Total: ₹{total_amt:,.0f}\n"
-        summary_text += f"🔥 Biggest: {biggest[2]} (₹{biggest[1]:,.0f})\n\n"
-        summary_text += "📌 Categories:\n"
-        for cat, amt in category_totals.items():
-            summary_text += f"- {cat}: ₹{amt:,.0f}\n"
-
-        return summary_text
-
-    except Exception as e:
-        return f"⚠️ Error: {str(e)}"
-
-async def generate_total():
-    try:
-        result = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
-        ).execute()
-        rows = result.get("values", [])[1:]
-
-        if not rows:
-            return "No expenses recorded yet."
+            await update.message.reply_text("No data yet.")
+            return
 
         total_amt = 0
         for row in rows:
@@ -178,44 +115,65 @@ async def generate_total():
             except:
                 continue
 
-        return f"💰 Total spent till now: ₹{total_amt:,.0f}"
+        await update.message.reply_text(f"💰 *Total spent so far:* ₹{total_amt:,.0f}", parse_mode="Markdown")
 
     except Exception as e:
-        return f"⚠️ Error: {str(e)}"
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
 # ======================
-# Scheduler jobs (auto push)
+# Automated Summary Sender
 # ======================
-async def send_daily_summary(app: Application):
-    text = await generate_summary(days=1)
-    await app.bot.send_message(chat_id=OWNER_CHAT_ID, text="📅 *Daily Report*\n\n" + text, parse_mode="Markdown")
+async def send_summary(chat_id: int):
+    try:
+        result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
+        ).execute()
+        rows = result.get("values", [])[1:]
 
-async def send_weekly_summary(app: Application):
-    text = await generate_summary(days=7)
-    await app.bot.send_message(chat_id=OWNER_CHAT_ID, text="📅 *Weekly Report*\n\n" + text, parse_mode="Markdown")
+        if not rows:
+            return
 
-async def send_monthly_summary(app: Application):
-    text = await generate_summary(days=30)
-    await app.bot.send_message(chat_id=OWNER_CHAT_ID, text="📅 *Monthly Report*\n\n" + text, parse_mode="Markdown")
+        today = datetime.datetime.now()
+        week_ago = today - datetime.timedelta(days=7)
+
+        expenses = []
+        for row in rows:
+            try:
+                date = datetime.datetime.strptime(row[0], "%d-%b-%Y")
+                amount = float(row[1].replace("₹", "").replace(",", ""))
+                category = row[2]
+                expenses.append((date, amount, category))
+            except:
+                continue
+
+        total = sum(x[1] for x in expenses)
+        biggest = max(expenses, key=lambda x: x[1])
+
+        summary_text = f"📊 *Expense Summary (All time)*\n\n"
+        summary_text += f"💰 Total: ₹{total:,.0f}\n"
+        summary_text += f"🔥 Biggest: {biggest[2]} (₹{biggest[1]:,.0f})\n"
+
+        await app.bot.send_message(chat_id=chat_id, text=summary_text, parse_mode="Markdown")
+
+    except Exception as e:
+        await app.bot.send_message(chat_id=chat_id, text=f"⚠️ Error in summary: {str(e)}")
 
 # ======================
 # Main
 # ======================
 def main():
+    global app
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Manual commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(CommandHandler("total", total))
-    app.add_handler(CommandHandler("id", get_id))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
 
-    # Scheduler setup
+    # Attach scheduler to PTB loop
     scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
-    scheduler.add_job(send_daily_summary, "cron", hour=21, minute=0, args=[app])   # 9PM IST daily
-    scheduler.add_job(send_weekly_summary, "cron", day_of_week="sun", hour=21, minute=0, args=[app])  # Sunday
-    scheduler.add_job(send_monthly_summary, "cron", day=1, hour=21, minute=0, args=[app])  # 1st of month
+    scheduler.add_job(lambda: asyncio.create_task(send_summary(CHAT_ID)), "cron", hour=21, minute=0)   # daily
+    scheduler.add_job(lambda: asyncio.create_task(send_summary(CHAT_ID)), "cron", day_of_week="sun", hour=21, minute=0)  # weekly
+    scheduler.add_job(lambda: asyncio.create_task(send_summary(CHAT_ID)), "cron", day=1, hour=21, minute=0)  # monthly
     scheduler.start()
 
     app.run_polling()
