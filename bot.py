@@ -7,34 +7,21 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 # ======================
-# Secrets
+# Config (Railway will inject via env vars)
 # ======================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8375627088:AAFdnn6KKwqsHYZ2ie73B9-YdMlC3Uu2C-Y")
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID", "1VEliBNt3PnUlp3UEsWRI-HU-b1KEafChsOx1jeR1PHk")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+service_account_info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
 
-# ======================
-# Hybrid Service Account Loader
-# ======================
-if os.getenv("SERVICE_ACCOUNT_JSON"):
-    # Railway: JSON comes from environment variable
-    service_account_info = json.loads(os.getenv("SERVICE_ACCOUNT_JSON"))
-    creds = service_account.Credentials.from_service_account_info(
-        service_account_info,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-else:
-    # Local: use the file
-    SERVICE_ACCOUNT_FILE = "service_account.json"
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-
+creds = service_account.Credentials.from_service_account_info(
+    service_account_info,
+    scopes=["https://www.googleapis.com/auth/spreadsheets"],
+)
 service = build("sheets", "v4", credentials=creds)
 sheet = service.spreadsheets()
 
 # ======================
-# Category auto-detect
+# Category auto-detect (maps free text → your dropdowns)
 # ======================
 CATEGORY_KEYWORDS = {
     "fuel": "🏍️ Bike Fuel",
@@ -48,7 +35,7 @@ CATEGORY_KEYWORDS = {
     "subscription": "📺 Subscriptions",
     "insurance": "📑 Insurance",
     "shop": "🎁 Miscellaneous / Shopping",
-    "others": "🌟 Others"
+    "others": "🌟 Others",
 }
 
 def detect_category(text: str) -> str:
@@ -62,30 +49,34 @@ def detect_category(text: str) -> str:
 # Bot Handlers
 # ======================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! Send me expenses like:\n`250 groceries dinner`\n\nUse /summary for weekly report.")
+    await update.message.reply_text(
+        "👋 Hi! Send me expenses like:\n"
+        "`250 groceries dinner`\n\n"
+        "If you don’t include a date, I’ll use today.\n"
+        "Use /summary for weekly report."
+    )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = update.message.text.strip()
         parts = text.split()
 
-        # Try to parse first word as date (dd-MMM-YYYY)
+        # Try parsing first word as a date (dd-MMM-YYYY)
         try:
             expense_date = datetime.datetime.strptime(parts[0], "%d-%b-%Y").strftime("%d-%b-%Y")
             amount = parts[1]
             notes = " ".join(parts[2:])
         except ValueError:
-            # No date → use today
+            # No valid date → assume today
             expense_date = datetime.datetime.now().strftime("%d-%b-%Y")
             amount = parts[0]
             notes = " ".join(parts[1:])
 
-        # Detect category
+        # Detect category & type
         category = detect_category(notes)
-
-        # Fixed vs Variable
         expense_type = "Fixed" if "EMI" in category or "Loan" in category else "Variable"
 
+        # Push to Google Sheets
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
