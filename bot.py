@@ -54,7 +54,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "`250 groceries dinner`\n\n"
         "If you don’t include a date, I’ll use today.\n"
         "Use /summary for weekly report.\n"
-        "Type 'Total' anytime to get lifetime spend."
+        "Type 'Total' anytime to get lifetime spend.\n"
+        "Use /list to see entries and /remove <row_number> to delete one."
     )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,7 +85,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Transactions!A:E",   # <-- ✅ matches your sheet tab name
+            range="Transactions!A:E",   # ✅ matches your sheet tab name
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
@@ -116,6 +117,68 @@ async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
         await update.message.reply_text(f"💰 *Total spent so far:* ₹{total_amt:,.0f}", parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+# ======================
+# Extra Features
+# ======================
+async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args:
+            await update.message.reply_text("⚠️ Usage: /remove <row_number>")
+            return
+
+        row_number = int(context.args[0])
+        if row_number <= 1:
+            await update.message.reply_text("⚠️ Cannot delete header row.")
+            return
+
+        requests = [{
+            "deleteDimension": {
+                "range": {
+                    "sheetId": 0,  # assumes Transactions is first sheet
+                    "dimension": "ROWS",
+                    "startIndex": row_number - 1,
+                    "endIndex": row_number
+                }
+            }
+        }]
+
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": requests}
+        ).execute()
+
+        await update.message.reply_text(f"🗑️ Deleted row {row_number} successfully!")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
+        ).execute()
+
+        rows = result.get("values", [])[1:]
+        if not rows:
+            await update.message.reply_text("No entries yet.")
+            return
+
+        preview = "📒 *Expense Log (first 10)*:\n\n"
+        for i, row in enumerate(rows[:10], start=2):
+            date = row[0] if len(row) > 0 else "-"
+            amount = row[1] if len(row) > 1 else "-"
+            category = row[2] if len(row) > 2 else "-"
+            notes = row[4] if len(row) > 4 else "-"
+            preview += f"Row {i}: {date} | ₹{amount} | {category} | {notes}\n"
+
+        if len(rows) > 10:
+            preview += f"\n...and {len(rows)-10} more rows."
+
+        await update.message.reply_text(preview, parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
@@ -177,6 +240,8 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("summary", summary))
+    app.add_handler(CommandHandler("remove", remove_entry))
+    app.add_handler(CommandHandler("list", list_entries))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
 
     app.run_polling()
