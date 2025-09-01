@@ -55,26 +55,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "If you don’t include a date, I’ll use today.\n"
         "Use /summary for weekly report.\n"
         "Type 'Total' anytime to get lifetime spend.\n"
-        "Use /list to see entries and /remove <row_number> to delete one."
+        "Use /list to see logs, /remove <row> to delete."
     )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         text = update.message.text.strip()
 
-        # If user asks for total
         if text.lower() == "total":
             return await total(update, context)
 
         parts = text.split()
 
-        # Try parsing first word as a date (dd-MMM-YYYY)
+        # Parse date if provided, else use today
         try:
             expense_date = datetime.datetime.strptime(parts[0], "%d-%b-%Y").strftime("%d-%b-%Y")
             amount = parts[1]
             notes = " ".join(parts[2:])
         except ValueError:
-            # No valid date → assume today
             expense_date = datetime.datetime.now().strftime("%d-%b-%Y")
             amount = parts[0]
             notes = " ".join(parts[1:])
@@ -85,7 +83,7 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         values = [[expense_date, amount, category, expense_type, notes]]
         sheet.values().append(
             spreadsheetId=SPREADSHEET_ID,
-            range="Transactions!A:E",   # ✅ matches your sheet tab name
+            range="Transactions!A:E",
             valueInputOption="USER_ENTERED",
             body={"values": values}
         ).execute()
@@ -122,7 +120,35 @@ async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
 # ======================
-# Extra Features
+# /list command
+# ======================
+async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
+        ).execute()
+        rows = result.get("values", [])[1:]
+
+        if not rows:
+            await update.message.reply_text("No entries found.")
+            return
+
+        msg = "📂 *Expense Log (first 10):*\n\n"
+        for i, row in enumerate(rows[:10], start=2):  # row numbers start at 2
+            date = row[0] if len(row) > 0 else "-"
+            amount = row[1] if len(row) > 1 else "-"
+            category = row[2] if len(row) > 2 else "-"
+            etype = row[3] if len(row) > 3 else "-"
+            notes = row[4] if len(row) > 4 else "-"
+            msg += f"Row {i}: {date} | ₹{amount} | {category} | {notes}\n"
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+# ======================
+# /remove command (fixed with real sheetId)
 # ======================
 async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -135,10 +161,23 @@ async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Cannot delete header row.")
             return
 
+        # Get sheetId for Transactions tab
+        sheet_metadata = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+        sheets = sheet_metadata.get("sheets", "")
+        sheet_id = None
+        for s in sheets:
+            if s["properties"]["title"] == "Transactions":
+                sheet_id = s["properties"]["sheetId"]
+                break
+
+        if sheet_id is None:
+            await update.message.reply_text("⚠️ Could not find sheet 'Transactions'.")
+            return
+
         requests = [{
             "deleteDimension": {
                 "range": {
-                    "sheetId": 0,  # assumes Transactions is first sheet
+                    "sheetId": sheet_id,
                     "dimension": "ROWS",
                     "startIndex": row_number - 1,
                     "endIndex": row_number
@@ -152,33 +191,6 @@ async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).execute()
 
         await update.message.reply_text(f"🗑️ Deleted row {row_number} successfully!")
-
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: {str(e)}")
-
-async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        result = sheet.values().get(
-            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
-        ).execute()
-
-        rows = result.get("values", [])[1:]
-        if not rows:
-            await update.message.reply_text("No entries yet.")
-            return
-
-        preview = "📒 *Expense Log (first 10)*:\n\n"
-        for i, row in enumerate(rows[:10], start=2):
-            date = row[0] if len(row) > 0 else "-"
-            amount = row[1] if len(row) > 1 else "-"
-            category = row[2] if len(row) > 2 else "-"
-            notes = row[4] if len(row) > 4 else "-"
-            preview += f"Row {i}: {date} | ₹{amount} | {category} | {notes}\n"
-
-        if len(rows) > 10:
-            preview += f"\n...and {len(rows)-10} more rows."
-
-        await update.message.reply_text(preview, parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
@@ -240,8 +252,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(CommandHandler("remove", remove_entry))
+    app.add_handler(CommandHandler("total", total))
     app.add_handler(CommandHandler("list", list_entries))
+    app.add_handler(CommandHandler("remove", remove_entry))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
 
     app.run_polling()
