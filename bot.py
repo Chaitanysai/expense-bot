@@ -35,7 +35,7 @@ CATEGORY_BUDGETS = {
     "💰 Savings": 12000,
     "📈 Investments": 12000,
     "🍱 Lifestyle": 6000,
-    "🎁 Buffer": 2500,
+    "🌟Others": 2500,
 }
 
 # ======================
@@ -61,7 +61,7 @@ CATEGORY_KEYWORDS = {
     "mutual": "📈 Investments",
     "sip": "📈 Investments",
     "shop": "🍱 Lifestyle",
-    "others": "🎁 Buffer",
+    "others": "🌟Others",
 }
 
 def detect_category(text: str) -> str:
@@ -69,7 +69,7 @@ def detect_category(text: str) -> str:
     for key, category in CATEGORY_KEYWORDS.items():
         if key in text:
             return category
-    return "🎁 Buffer"
+    return "🌟Others"
 
 # ======================
 # Bot Handlers
