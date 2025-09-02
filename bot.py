@@ -23,19 +23,45 @@ creds = service_account.Credentials.from_service_account_info(
 service = build("sheets", "v4", credentials=creds)
 sheet = service.spreadsheets()
 
+# ======================
+# Budget Allocations (₹ per month)
+# ======================
+CATEGORY_BUDGETS = {
+    "🚗 EMI – Bike Loan": 6500,
+    "🛒 Groceries": 9000,
+    "📑 Utilities": 3000,
+    "🏍️ Bike Fuel": 2000,
+    "💊 Healthcare": 2000,
+    "💰 Savings": 12000,
+    "📈 Investments": 12000,
+    "🍱 Lifestyle": 6000,
+    "🎁 Buffer": 2500,
+}
+
+# ======================
+# Category Auto-detect
+# ======================
 CATEGORY_KEYWORDS = {
     "fuel": "🏍️ Bike Fuel",
     "petrol": "🏍️ Bike Fuel",
     "grocery": "🛒 Groceries",
     "groceries": "🛒 Groceries",
-    "food": "🍱 Food Delivery / Dining Out",
-    "dining": "🍱 Food Delivery / Dining Out",
+    "food": "🍱 Lifestyle",
+    "dining": "🍱 Lifestyle",
     "emi": "🚗 EMI – Bike Loan",
-    "loan": "💳 EMI – Home Loan",
-    "subscription": "📺 Subscriptions",
-    "insurance": "📑 Insurance",
-    "shop": "🎁 Miscellaneous / Shopping",
-    "others": "🌟 Others",
+    "loan": "🚗 EMI – Bike Loan",
+    "bill": "📑 Utilities",
+    "electricity": "📑 Utilities",
+    "internet": "📑 Utilities",
+    "insurance": "💊 Healthcare",
+    "medicine": "💊 Healthcare",
+    "health": "💊 Healthcare",
+    "save": "💰 Savings",
+    "invest": "📈 Investments",
+    "mutual": "📈 Investments",
+    "sip": "📈 Investments",
+    "shop": "🍱 Lifestyle",
+    "others": "🎁 Buffer",
 }
 
 def detect_category(text: str) -> str:
@@ -43,7 +69,7 @@ def detect_category(text: str) -> str:
     for key, category in CATEGORY_KEYWORDS.items():
         if key in text:
             return category
-    return "🌟 Others"
+    return "🎁 Buffer"
 
 # ======================
 # Bot Handlers
@@ -55,7 +81,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "If you don’t include a date, I’ll use today.\n"
         "Use /summary for weekly report.\n"
         "Type 'Total' anytime to get lifetime spend.\n"
-        "Use /list to see logs, /remove <row> to delete."
+        "Use /list to see logs, /remove <row> to delete.\n"
+        "Use /budget to see category-wise budget usage."
     )
 
 async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -70,11 +97,11 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Parse date if provided, else use today
         try:
             expense_date = datetime.datetime.strptime(parts[0], "%d-%b-%Y").strftime("%d-%b-%Y")
-            amount = parts[1]
+            amount = float(parts[1])
             notes = " ".join(parts[2:])
         except ValueError:
             expense_date = datetime.datetime.now().strftime("%d-%b-%Y")
-            amount = parts[0]
+            amount = float(parts[0])
             notes = " ".join(parts[1:])
 
         category = detect_category(notes)
@@ -88,33 +115,70 @@ async def add_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             body={"values": values}
         ).execute()
 
-        await update.message.reply_text(f"✅ Added: {amount} under {category} ({expense_type})")
+        msg = f"✅ Added: ₹{amount:.0f} under {category} ({expense_type})"
+
+        # Budget check
+        if category in CATEGORY_BUDGETS:
+            spent = get_category_total(category)
+            budget = CATEGORY_BUDGETS[category]
+            percent = (spent / budget) * 100
+            if percent >= 100:
+                msg += f"\n🔴 ALERT: {category} budget exceeded! (₹{spent:.0f} / ₹{budget})"
+            elif percent >= 80:
+                msg += f"\n⚠️ Warning: {category} at {percent:.0f}% of budget (₹{spent:.0f} / ₹{budget})"
+
+        await update.message.reply_text(msg)
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
-async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_summary(update.message.chat_id)
+def get_category_total(category: str) -> float:
+    """Fetch total spent for a category from the sheet."""
+    result = sheet.values().get(
+        spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
+    ).execute()
+    rows = result.get("values", [])[1:]
+    total = 0
+    for row in rows:
+        if len(row) >= 3 and row[2] == category:
+            try:
+                total += float(str(row[1]).replace("₹", "").replace(",", ""))
+            except:
+                continue
+    return total
 
-async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ======================
+# /budget command
+# ======================
+async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         result = sheet.values().get(
             spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
         ).execute()
         rows = result.get("values", [])[1:]
 
-        if not rows:
-            await update.message.reply_text("No data yet.")
-            return
-
-        total_amt = 0
+        category_totals = {}
         for row in rows:
-            try:
-                total_amt += float(row[1].replace("₹", "").replace(",", ""))
-            except:
-                continue
+            if len(row) >= 3:
+                category = row[2]
+                try:
+                    amt = float(str(row[1]).replace("₹", "").replace(",", ""))
+                    category_totals[category] = category_totals.get(category, 0) + amt
+                except:
+                    continue
 
-        await update.message.reply_text(f"💰 *Total spent so far:* ₹{total_amt:,.0f}", parse_mode="Markdown")
+        msg = "📊 *Category-wise Budget Status:*\n\n"
+        for cat, budget_amt in CATEGORY_BUDGETS.items():
+            spent = category_totals.get(cat, 0)
+            percent = (spent / budget_amt) * 100
+            status = "✅"
+            if percent >= 100:
+                status = "🔴"
+            elif percent >= 80:
+                status = "⚠️"
+            msg += f"{status} {cat}: ₹{spent:,.0f} / ₹{budget_amt} ({percent:.0f}%)\n"
+
+        await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
@@ -138,7 +202,6 @@ async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
             date = row[0] if len(row) > 0 else "-"
             amount = row[1] if len(row) > 1 else "-"
             category = row[2] if len(row) > 2 else "-"
-            etype = row[3] if len(row) > 3 else "-"
             notes = row[4] if len(row) > 4 else "-"
             msg += f"Row {i}: {date} | ₹{amount} | {category} | {notes}\n"
 
@@ -148,7 +211,7 @@ async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
 
 # ======================
-# /remove command (fixed with real sheetId)
+# /remove command
 # ======================
 async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -161,7 +224,6 @@ async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Cannot delete header row.")
             return
 
-        # Get sheetId for Transactions tab
         sheet_metadata = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
         sheets = sheet_metadata.get("sheets", "")
         sheet_id = None
@@ -191,6 +253,35 @@ async def remove_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).execute()
 
         await update.message.reply_text(f"🗑️ Deleted row {row_number} successfully!")
+
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)}")
+
+# ======================
+# /summary and total
+# ======================
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await send_summary(update.message.chat_id)
+
+async def total(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        result = sheet.values().get(
+            spreadsheetId=SPREADSHEET_ID, range="Transactions!A:E"
+        ).execute()
+        rows = result.get("values", [])[1:]
+
+        if not rows:
+            await update.message.reply_text("No data yet.")
+            return
+
+        total_amt = 0
+        for row in rows:
+            try:
+                total_amt += float(row[1].replace("₹", "").replace(",", ""))
+            except:
+                continue
+
+        await update.message.reply_text(f"💰 *Total spent so far:* ₹{total_amt:,.0f}", parse_mode="Markdown")
 
     except Exception as e:
         await update.message.reply_text(f"⚠️ Error: {str(e)}")
@@ -255,6 +346,7 @@ def main():
     app.add_handler(CommandHandler("total", total))
     app.add_handler(CommandHandler("list", list_entries))
     app.add_handler(CommandHandler("remove", remove_entry))
+    app.add_handler(CommandHandler("budget", budget))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_expense))
 
     app.run_polling()
